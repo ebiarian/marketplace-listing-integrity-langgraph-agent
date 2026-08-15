@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Environments
+.env
+.venv
+env/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ChromaDB
+chroma_db/
+
+# HuggingFace model cache (large, user-local — not committed)
+.cache/
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# Data
+*.csv
+*.json
+*.pkl
+*.db
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Internal session log
+project.md

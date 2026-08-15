@@ -1,0 +1,25 @@
+name: listing-integrity-agent
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - jupyter
+  - notebook
+  - ipykernel
+  - pandas
+  - pytorch>=2.1
+  - pyvips                        # required by Moondream2, installs libvips
+  - pip:
+      # Vision pipeline — ported from product-image-description-alignment
+      - transformers>=4.37        # Moondream2
+      - easyocr>=1.7.1            # OCR for label text extraction
+      - accelerate>=0.27          # optimised HuggingFace model loading
+      # LangGraph / LangChain — agent orchestration
+      - langgraph
+      - langchain-core
+      - langchain-ollama          # local Ollama: qwen2.5:14b (reasoning) + nomic-embed-text (embeddings)
+      # RAG
+      - langchain-chroma
+      - chromadb
