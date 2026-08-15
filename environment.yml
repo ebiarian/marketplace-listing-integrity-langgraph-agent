@@ -13,9 +13,13 @@ dependencies:
   - pyvips                        # required by Moondream2, installs libvips
   - pip:
       # Vision pipeline — ported from product-image-description-alignment
-      - transformers>=4.37        # Moondream2
+      - transformers>=4.37,<5     # Moondream2's remote code (trust_remote_code=True,
+                                   # revision 2025-01-09) targets the 4.x API — transformers
+                                   # 5.x renamed/removed internals it relies on (e.g.
+                                   # all_tied_weights_keys), breaking model loading
       - easyocr>=1.7.1            # OCR for label text extraction
       - accelerate>=0.27          # optimised HuggingFace model loading
+      - einops                    # required by Moondream2's remote modeling code
       # LangGraph / LangChain — agent orchestration
       - langgraph
       - langchain-core
