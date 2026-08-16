@@ -1,7 +1,13 @@
 # Ollama model used as the agent's reasoning brain — matches the sibling
-# ridesharing project's final default (see its README), already proven
-# reliable for structured tool-calling on a 16GB M2 Mac.
-OLLAMA_MODEL = "qwen2.5:14b"
+# ridesharing project's validated default. qwen2.5:7b was tried as a speed
+# diagnostic after fixing the GPU memory/caching issues (see project.md):
+# it ran stably but was unreliable on two of five test listings — it
+# skipped verifying a critical feature by "inferring" the answer instead of
+# calling ask_vision_question, and it flagged a plural/singular wording
+# difference as a real mismatch despite an explicit prompt rule against it.
+# Reverted to 14b for better instruction-following on this genuinely
+# multi-step tool-calling task, per the sibling project's own Part 2 findings.
+OLLAMA_MODEL = "qwen2.5:7b"
 
 # Local embedding model for the RAG policy corpus, served via Ollama — keeps
 # the whole stack offline, no cloud embeddings API required.
