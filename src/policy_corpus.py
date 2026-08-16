@@ -2,9 +2,15 @@
 # self-contained policy document for one product category, written the way an
 # internal trust & safety wiki page would be — critical features (any
 # mismatch is an automatic flag) versus cosmetic features (a mismatch is only
-# a soft warning). This is what the agent actually reasons over: retrieval
-# changes WHICH features it bothers checking and how strictly, not just what
-# text gets pasted into the prompt.
+# a soft warning).
+#
+# critical_features / cosmetic_features are structured lists, separate from
+# the prose "text" field below. The prose exists for the RAG document itself
+# and for the final explanation's context; the structured lists are what the
+# deterministic checklist-builder in agent.py actually reads — pulling a
+# feature list back out of prose with an LLM would be exactly the kind of
+# needless token spend this redesign removes. Keep both in sync by hand;
+# there are only 4 categories, so this is a small, easily-reviewed surface.
 #
 # common_products backs the two-question VQA category/product detection in
 # vision_tools.py: Moondream2 is small enough that a single open-ended "what
@@ -19,6 +25,8 @@ CATEGORY_POLICIES = [
     {
         "category": "grocery",
         "common_products": ["milk", "coffee", "butter", "chicken", "bread", "juice"],
+        "critical_features": ["brand", "product_type", "size", "variant", "container"],
+        "cosmetic_features": [],
         "text": (
             "Category: grocery (e.g. milk, chicken, butter, produce, packaged food).\n"
             "Critical features — any mismatch here is an automatic listing flag: "
@@ -34,6 +42,8 @@ CATEGORY_POLICIES = [
     {
         "category": "electronics",
         "common_products": ["headphones", "a phone case", "a charger", "a cable"],
+        "critical_features": ["brand", "model_number", "product_type", "key_spec"],
+        "cosmetic_features": ["color", "packaging_style"],
         "text": (
             "Category: electronics (e.g. headphones, phone cases, chargers, cables).\n"
             "Critical features — any mismatch here is an automatic listing flag: "
@@ -50,6 +60,8 @@ CATEGORY_POLICIES = [
     {
         "category": "apparel",
         "common_products": ["a t-shirt", "a jacket", "shoes"],
+        "critical_features": ["size", "color", "product_type", "material"],
+        "cosmetic_features": ["brand"],
         "text": (
             "Category: apparel (e.g. t-shirts, jackets, shoes).\n"
             "Critical features — any mismatch here is an automatic listing flag: "
@@ -64,6 +76,8 @@ CATEGORY_POLICIES = [
     },
     {
         "category": "default",
+        "critical_features": ["brand", "product_type", "size"],
+        "cosmetic_features": [],
         "text": (
             "Category: default / general — used when no more specific category "
             "policy is a good match for the listing.\n"
