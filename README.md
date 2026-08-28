@@ -24,14 +24,15 @@ The current version keeps the LLM only where testing showed it's genuinely neede
 |---|---|---|
 | 1. Detect category, then product | two short constrained VQA questions, image-grounded — not from the (untrusted) description | No — fixed order, no judgment |
 | 2. Self-consistency check + retry | does the product belong to the category? A membership check, with a fixed one-time retry rule | No |
-| 3. Hard-stop vs. description | does the image-grounded product agree with the claim? Normalized string comparison | No |
-| 4. Retrieve category policy | exact ID lookup if known, semantic search as fallback | No — embedding model only |
-| 5. Build checklist | union of the policy's critical features and any other concrete claim in the description | No — set logic |
-| 6. Verify each feature | OCR first, then a fixed-template VQA fallback question, both matched via normalized string comparison | No |
-| 7. Resolve anything still ambiguous | **only if step 6 left something genuinely unresolved** | **Yes — the only LLM involvement** |
-| 8. Final verdict | hard veto on any critical mismatch | No — computed, not generated |
+| 3. Retrieve category policy | exact ID lookup if known, semantic search as fallback | No — embedding model only |
+| 4. Extract description features | map the listing's raw text onto the resolved category's known feature schema | **Yes — genuine language understanding** |
+| 5. Hard-stop vs. description | does the image-grounded product agree with the *extracted* claim? Normalized string comparison | No |
+| 6. Build checklist | union of the policy's critical features and any other concrete claim in the extracted description | No — set logic |
+| 7. Verify each feature | OCR first, then a fixed-template VQA fallback question, both matched via normalized string comparison | No |
+| 8. Resolve anything still ambiguous | **only if step 7 left something genuinely unresolved** | **Yes — narrow escalation, rare** |
+| 9. Final verdict | hard veto on any critical mismatch | No — computed, not generated |
 
-A listing where every feature resolves cleanly in step 6 never invokes the LLM at all.
+A listing where every feature resolves cleanly makes exactly one LLM call in the whole pipeline — extraction. Category/product detection, checklist building, and every comparison are deterministic; only escalation (step 8) adds more, and only when genuinely needed.
 
 **Why category detection starts from the image, not the description.** The whole point of this project is to check whether the description can be trusted — so nothing here is allowed to trust it first. Category and product identity are established from the image alone (stages 1–2) before the description's own claims are even looked at (stage 3). A description that lies about `product_type` entirely (e.g. milk photographed, described as juice) is caught immediately here, before any brand/size/variant checking happens.
 
@@ -41,9 +42,11 @@ A listing where every feature resolves cleanly in step 6 never invokes the LLM a
 
 **Why feature verification is deterministic, and what that fixed.** OCR output is one unstructured blob of every text fragment on a label; testing found a model would sometimes grab the wrong number as "the size" (a nutrition-panel fragment instead of the actual size claim). The fix: search the OCR text for whether the *claimed* value is present, rather than asking a model to independently interpret which fragment means what — the same substring-matching approach the original deterministic pipeline always used. Normalizing values (lowercase, strip punctuation, fold plural/singular) before comparing also fixed a false "chicken breast vs. chicken breasts" mismatch a model kept flagging despite an explicit prompt rule against it. Making both fixes structural rather than prompt-based means they can't be "forgotten" by a smaller or less reliable model.
 
-**Why the LLM only appears in step 7.** Everything through step 6 is either a fixed sequence or a comparison with a confident answer. The LLM is reserved for genuinely ambiguous cases — a VQA answer that neither clearly confirms nor clearly contradicts a claim — via a narrow LangGraph ReAct sub-graph bound to only two tools (`read_label_text`, `ask_vision_question`), not the full original tool list.
+**Why extraction (step 4) is the one place an LLM genuinely earns its keep.** Every other step turned out to be reliably handled by code once tested — category detection, checklist building, feature comparison. Extraction is different: real listings arrive as raw text a seller wrote (`"Prairie Farms Whole Milk, 1 Quart Carton"`), and mapping arbitrary phrasing onto known feature names is a language-understanding task no rule-based parser approximates at real marketplace scale. Getting it reliable took three iterations: a bare schema with no field descriptions extracted only 2 of 5 fields; adding descriptions changed nothing (same 2 succeeded, same 3 failed — ruling out "insufficient hints" as the cause); adding few-shot examples got 4 of 5, with the last gap (`"Whole Milk"` not splitting into `product_type: "milk"` + `variant: "whole"`) traced to open-ended extraction being unreliable for a field with a genuinely bounded vocabulary. Constraining `variant` (and `container`) to a closest-match pick from a known list — the same principle as `detect_category`/`detect_product`'s closed option lists — fixed it. `brand` and `size` have no realistic bounded vocabulary and stay open text.
 
-The OCR and VQA extraction logic itself is ported directly from `product-image-description-alignment` — this project doesn't reinvent feature extraction, it changes who decides *when* and *what* to extract, and adds the category/product detection layer that pipeline never had.
+**Why the escalation LLM only appears in step 8.** Everything through step 7 is either a fixed sequence or a comparison with a confident answer. The LLM is reserved for genuinely ambiguous cases — a VQA answer that neither clearly confirms nor clearly contradicts a claim — via a narrow LangGraph ReAct sub-graph bound to only two tools (`read_label_text`, `ask_vision_question`), not the full original tool list.
+
+The OCR and VQA extraction logic itself is ported directly from `product-image-description-alignment` — this project doesn't reinvent feature extraction, it changes who decides *when* and *what* to extract, and adds both the category/product detection layer and the text-extraction layer that pipeline never had.
 
 ---
 
@@ -53,12 +56,13 @@ The OCR and VQA extraction logic itself is ported directly from `product-image-d
 marketplace-listing-integrity-langgraph-agent/
 ├── src/
 │   ├── config.py             # Model names, Chroma settings, recursion limit
-│   ├── policy_corpus.py      # Category policy documents + structured critical/cosmetic feature lists + common_products (the RAG corpus)
-│   ├── retrieval.py          # Chroma vector store + retrieve_category_policy / get_checklist_features (exact ID lookup, semantic fallback)
+│   ├── policy_corpus.py      # Category policy documents + critical/cosmetic feature lists + common_products + bounded_features vocabularies (the RAG corpus)
+│   ├── retrieval.py          # Chroma vector store + retrieve_category_policy / get_checklist_features / get_bounded_vocabulary (exact ID lookup, semantic fallback)
 │   ├── vision_tools.py       # OCR + Moondream2 VQA: detect_category_and_product (deterministic), read_label_text, ask_vision_question (LLM-facing), normalization/matching helpers
+│   ├── extraction.py         # extract_description_features() — the one genuine LLM-judgment step: raw text -> structured schema
 │   ├── tools.py              # ALL_TOOLS — only the two tools still exposed to the LLM's narrow escalation loop
-│   ├── listings.py           # Synthetic test listings (real product images, injected mismatches)
-│   └── agent.py              # Deterministic pipeline + narrow escalation sub-graph + verify_listing()
+│   ├── listings.py           # Synthetic test listings (real product images + raw description text, injected mismatches)
+│   └── agent.py              # Deterministic pipeline + extraction + narrow escalation sub-graph + verify_listing()
 ├── notebooks/
 │   └── 01_marketplace_listing_integrity_agent.ipynb
 └── environment.yml
@@ -91,7 +95,7 @@ ollama serve
 jupyter notebook notebooks/01_marketplace_listing_integrity_agent.ipynb
 ```
 
-The notebook builds the RAG policy corpus, demonstrates retrieval in isolation, walks through the deterministic category/product detection and feature verification steps individually (so you can see exactly what resolves without an LLM call), builds and diagrams the narrow escalation sub-graph, then runs the full pipeline against five listings — a correct one, three with injected mismatches (wrong brand, wrong size, wrong product entirely), and one more correct listing as a control — timing each and reporting whether escalation was needed. Most listings should complete in a few seconds with `escalated: False`; only genuinely ambiguous cases should reach the LLM at all.
+The notebook builds the RAG policy corpus, demonstrates retrieval in isolation, walks through the deterministic category/product detection, the extraction step, and feature verification individually (so you can see exactly what resolves without an LLM call and what doesn't), builds and diagrams the narrow escalation sub-graph, then runs the full pipeline against five listings — a correct one, three with injected mismatches (wrong brand, wrong size, wrong product entirely), and one more correct listing as a control — timing each and reporting whether escalation was needed. Most listings should complete with exactly one LLM call (extraction) and `escalated: False`; only genuinely ambiguous cases should reach the escalation sub-graph.
 
 ### Use in your own code
 
@@ -105,13 +109,7 @@ graph = build_graph()   # the narrow escalation sub-graph — only invoked if ne
 result = verify_listing(
     graph,
     image_url="https://example.com/product.jpg",
-    description_features={
-        "product_type": "milk",
-        "brand":        "prairie farms",
-        "size":         "1 quart",
-        "variant":      "whole",
-        "container":    "carton",
-    },
+    raw_description="Prairie Farms Whole Milk, 1 Quart Carton",  # real listing text, not a pre-structured dict
 )
 
 print(result["answer"])         # Verdict / Category / Critical features / Reasoning
@@ -124,7 +122,8 @@ print(result["escalated"])      # True only if a feature needed the LLM sub-loop
 
 - **Category corpus is small and synthetic** — three categories plus a default, written for this project, not sourced from a real trust & safety policy document
 - **`common_products` lists are hand-curated and narrow** — a genuinely novel product within a known category (e.g. a grocery item that isn't milk/coffee/butter/chicken/bread/juice) still gets forced into `"something else"` by `detect_product`, the same "not exhaustive at marketplace scale" limitation the original `product-image-description-alignment` project already named for its own VQA prompts — just relocated here, one layer up
-- **`FEATURE_QUESTION_TEMPLATES` are generic, one template per feature name reused across every category** — a real system would likely need category-specific phrasing, not "What is the size or quantity of this product?" for both a gallon of milk and a pair of headphones
+- **`feature_questions` are generic, one template per feature name reused across every category** — a real system would likely need category-specific phrasing, not "What is the size or quantity of this product?" for both a gallon of milk and a pair of headphones
+- **`bounded_features` vocabularies (`variant`, `container`) are hand-curated and grocery-only** — electronics and apparel don't have one yet, so any bounded-ish field they might need (e.g. a closed list for `color`) would currently extract as open text, untested
 - **The hard-stop and self-consistency checks have no escalation path** — unlike feature-level ambiguity, a genuinely unclear product/category disagreement is resolved by a fixed rule (trust category, treat product as unconfirmed) rather than investigated further by the LLM
 - **Live testing is grocery-only** — the RAG corpus includes electronics and apparel policies and retrieval correctly discriminates between all three, but the full agent has only been exercised end-to-end on real grocery product images
 - **No human-in-the-loop yet** — every verdict is fully automatic; a production system would likely gate high-risk verdicts behind human review, the way the sibling ridesharing project gates critical-severity decisions with `interrupt()`
