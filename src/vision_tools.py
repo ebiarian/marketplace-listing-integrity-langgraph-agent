@@ -286,7 +286,19 @@ def normalize_value(text: str) -> str:
     return " ".join(words)
 
 
-_UNCERTAIN_PHRASES = ("not visible", "not shown", "can't tell", "cannot tell", "unclear", "unknown", "not sure")
+_UNCERTAIN_PHRASES = (
+    "not visible", "not shown", "can't tell", "cannot tell", "unclear", "unknown", "not sure",
+    "hard to tell", "difficult to determine", "not clear", "not certain", "don't know",
+    "not specified", "no specific", "cannot determine", "hard to determine",
+)
+
+# A no-overlap VQA answer only counts as a confident mismatch (False) when
+# it's short enough to look like a crisp alternate value for the same field
+# (e.g. a different brand name) — every genuinely confident answer seen in
+# testing has been a short phrase ("prairie farms", "8oz", "salted"). A
+# longer answer with no overlap reads as hedging or describing rather than
+# directly contradicting, so it's escalated instead of assumed wrong.
+_MAX_CONFIDENT_MISMATCH_WORDS = 6
 
 
 def check_against_ocr(claimed_value: str, ocr_text: str) -> bool | None:
@@ -309,8 +321,12 @@ def check_against_ocr(claimed_value: str, ocr_text: str) -> bool | None:
 def check_against_vqa_answer(claimed_value: str, vqa_answer: str) -> bool | None:
     """
     Unlike OCR's unstructured blob, a VQA answer is a direct response to a
-    targeted question about ONE feature — so an answer that clearly states
-    something else counts as a real mismatch, not just an absence.
+    targeted question about ONE feature — so a short answer that clearly
+    states something else counts as a real mismatch, not just an absence.
+    A no-overlap answer that's too long to look like a crisp alternate value
+    (see _MAX_CONFIDENT_MISMATCH_WORDS) is treated as ambiguous instead —
+    vague or hedging phrasing shouldn't be assumed to be a confident
+    contradiction just because it happens not to contain the claimed value.
     """
     if any(phrase in vqa_answer.lower() for phrase in _UNCERTAIN_PHRASES):
         return None
@@ -320,4 +336,6 @@ def check_against_vqa_answer(claimed_value: str, vqa_answer: str) -> bool | None
         return None
     if claimed_norm in answer_norm or answer_norm in claimed_norm:
         return True
+    if len(answer_norm.split()) > _MAX_CONFIDENT_MISMATCH_WORDS:
+        return None
     return False
