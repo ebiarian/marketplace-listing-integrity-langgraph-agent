@@ -21,12 +21,37 @@
 # has no common_products: it's never something VQA is asked to detect, only
 # a fallback retrieval lands on when the image genuinely doesn't fit any
 # known category.
+#
+# bounded_features: a closed vocabulary for features that genuinely have
+# one, used by extraction.py to constrain that field to a multiple-choice
+# pick instead of open text extraction. Tested finding: asking an LLM to
+# freely extract+split a compound phrase like "Whole Milk" into product_type
+# "milk" + variant "whole" was unreliable (it either merged them or dropped
+# variant entirely); asking it to pick the closest match from a known list
+# fixed it immediately — same principle as detect_category/detect_product's
+# closed option lists. Only features with a genuinely bounded real-world
+# vocabulary get one here (variant, container) — brand (unbounded company
+# names) and size (unbounded number+unit combinations) do not, and stay as
+# open text extraction. A feature not listed here has no bounded vocabulary
+# and extraction.py treats it as open text.
 CATEGORY_POLICIES = [
     {
         "category": "grocery",
         "common_products": ["milk", "coffee", "butter", "chicken", "bread", "juice"],
         "critical_features": ["brand", "product_type", "size", "variant", "container"],
         "cosmetic_features": [],
+        "bounded_features": {
+            "variant": [
+                "whole", "2%", "1%", "skim", "reduced fat",
+                "salted", "unsalted",
+                "boneless skinless", "bone-in", "skin-on",
+                "dark roast", "medium roast", "light roast", "classic roast", "decaf",
+                "whole wheat", "white", "multigrain", "sourdough",
+                "orange", "apple", "with pulp", "no pulp",
+                "other", "not applicable",
+            ],
+            "container": ["bottle", "can", "carton", "container", "canister", "bag", "box", "other"],
+        },
         "text": (
             "Category: grocery (e.g. milk, chicken, butter, produce, packaged food).\n"
             "Critical features — any mismatch here is an automatic listing flag: "

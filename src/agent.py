@@ -4,11 +4,12 @@ from typing import Annotated
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
-from langgraph.graph import StateGraph, START, END
+from langgraph.graph import StateGraph, START
 from langgraph.prebuilt import ToolNode, tools_condition
 from typing_extensions import TypedDict
 
 from src.config import OLLAMA_MODEL, RECURSION_LIMIT
+from src.extraction import extract_description_features
 from src.retrieval import get_checklist_features
 from src.tools import ALL_TOOLS
 from src.vision_tools import (
@@ -273,12 +274,20 @@ def _assemble_result(category: str, results: dict, critical_feature_names: list[
 
 # ── Top-level orchestration ──────────────────────────────────────────────────
 
-def verify_listing(graph, image_url: str, description_features: dict) -> dict:
+def verify_listing(graph, image_url: str, raw_description: str) -> dict:
     """
-    Runs the full pipeline for one listing. `graph` is the compiled
-    escalation sub-graph from build_graph() — only ever actually invoked if
-    a feature genuinely can't be resolved deterministically, so most
-    listings complete this function without a single LLM call.
+    Runs the full pipeline for one listing. `raw_description` is the
+    listing's actual text — a title/description a seller wrote, e.g.
+    "Prairie Farms Whole Milk, 1 Quart Carton" — not a pre-structured dict.
+    Real listings never arrive pre-parsed; extraction is what turns this raw
+    text into the same feature -> value shape the rest of the pipeline
+    already expected, so it always runs, unconditionally, not as a fallback
+    for "unstructured" input versus some other structured path.
+
+    `graph` is the compiled escalation sub-graph from build_graph() — only
+    ever actually invoked if a feature genuinely can't be resolved
+    deterministically, so most listings complete this function with only
+    the one extraction LLM call, not a full ReAct loop.
 
     Returns a dict with the final "verdict"/"answer" plus diagnostic fields
     (category, product, escalated, ambiguous_features, ...) useful for
@@ -290,16 +299,21 @@ def verify_listing(graph, image_url: str, description_features: dict) -> dict:
     resolved_product = product if product_confirmed else category
     display_category = _clean_category_name(category)
 
+    critical_features, cosmetic_features = get_checklist_features(category)
+    description_features = extract_description_features(
+        raw_description, category, critical_features, cosmetic_features,
+    )
+
     claimed_product_type = description_features.get("product_type", "")
     if _hard_stop_mismatch(resolved_product, claimed_product_type):
         results = {"product_type": {"value": claimed_product_type, "match": False, "source": "detect_category/detect_product"}}
         return _assemble_result(
             display_category, results, critical_feature_names=["product_type"],
             product=product, product_confirmed=product_confirmed,
+            description_features=description_features,
             hard_stop=True, escalated=False, ambiguous_features=[],
         )
 
-    critical_features, _cosmetic_features = get_checklist_features(category)
     checklist, checklist_critical = _build_checklist(critical_features, description_features)
 
     results, ambiguous = _deterministic_verify(image_url, checklist)
@@ -317,5 +331,6 @@ def verify_listing(graph, image_url: str, description_features: dict) -> dict:
     return _assemble_result(
         display_category, results, critical_feature_names=checklist_critical_with_product,
         product=product, product_confirmed=product_confirmed,
+        description_features=description_features,
         hard_stop=False, escalated=escalated, ambiguous_features=ambiguous,
     )

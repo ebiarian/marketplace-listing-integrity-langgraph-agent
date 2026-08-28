@@ -91,3 +91,15 @@ def get_checklist_features(category: str) -> tuple[list[str], list[str]]:
     """
     policy = _resolve_policy(category)
     return policy.get("critical_features", []), policy.get("cosmetic_features", [])
+
+
+def get_bounded_vocabulary(category: str) -> dict[str, list[str]]:
+    """
+    Returns {feature_name: [allowed values]} for features with a genuinely
+    bounded real-world vocabulary (e.g. variant, container) — used by
+    extraction.py to constrain those specific fields to a closest-match pick
+    instead of open text extraction. A feature not present in the returned
+    dict has no bounded vocabulary and should be extracted as open text.
+    """
+    policy = _resolve_policy(category)
+    return policy.get("bounded_features", {})
