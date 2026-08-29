@@ -1,10 +1,10 @@
 import operator
 import re
-from typing import Annotated
+from typing import Annotated, Literal
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
-from langgraph.graph import StateGraph, START
+from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode, tools_condition
 from typing_extensions import TypedDict
 
@@ -35,26 +35,6 @@ def _clean_category_name(category: str) -> str:
     """
     policy = resolve_category(category)
     return policy["category"] if policy else category
-
-# ── Why this pipeline is mostly NOT an LLM decision loop ─────────────────────
-# The first version of this agent put every step behind an LLM's judgment —
-# genuine ReAct end to end. Testing surfaced two problems: ~8-12 sequential
-# LLM turns per listing made it slow (~1-2 min/listing locally) and, more
-# importantly, most of those turns weren't judgment calls at all — "call
-# detect_category, then detect_product" is the same fixed sequence every
-# time, with no ambiguity for an LLM to resolve. Worse, exposing OCR/VQA
-# fallback as an LLM *choice* meant the model sometimes skipped it —
-# "inferring" an unconfirmed brand from context instead of actually checking
-# — which is precisely the failure mode this whole project exists to catch.
-#
-# This version keeps genuine LLM judgment only where testing showed it's
-# actually needed: interpreting a VQA answer that's genuinely ambiguous after
-# automatic OCR/VQA matching already tried and failed to resolve it. A
-# listing where every feature resolves cleanly never invokes the LLM at all.
-# This mirrors the exact lesson the sibling ridesharing project already
-# learned in its own Stage 1/2 split — the LLM's job is narrowed to what a
-# lookup table genuinely can't do, not asked to also re-confirm decisions
-# that were never actually in question.
 
 
 def _build_checklist(critical_features: list[str], description_features: dict) -> tuple[dict, list[str]]:
@@ -108,12 +88,11 @@ def _hard_stop_mismatch(resolved_product: str, claimed_product_type: str) -> boo
 def _deterministic_verify(image_url: str, checklist: dict) -> tuple[dict, list[str]]:
     """
     OCR first (checked once against the whole label, not once per feature),
-    VQA fallback for anything OCR didn't find — the same two tools as
-    before, just called directly instead of being offered to an LLM to
-    decide whether to use. Returns (results, ambiguous_feature_names) —
-    ambiguous is only ever non-empty when a targeted VQA question's answer
-    couldn't be confidently matched OR contradicted, which is genuinely rare
-    given how targeted these fallback questions are.
+    VQA fallback for anything OCR didn't find. Returns (results,
+    ambiguous_feature_names) — ambiguous is only ever non-empty when a
+    targeted VQA question's answer couldn't be confidently matched OR
+    contradicted, which is genuinely rare given how targeted these fallback
+    questions are.
     """
     ocr_text = read_label_text.invoke({"image_url": image_url})
 
@@ -138,10 +117,12 @@ def _deterministic_verify(image_url: str, checklist: dict) -> tuple[dict, list[s
     return results, ambiguous
 
 
-# ── Narrow ReAct escalation — the only LLM involvement in this pipeline ─────
-# Only reached when the deterministic pass above genuinely couldn't resolve
+# ── Escalation sub-graph — one node of the full pipeline graph below ───────
+# Only reached when the deterministic pass genuinely couldn't resolve
 # something. Scoped to just the ambiguous features, with only the two tools
-# a fallback check could ever need — not the full original tool list.
+# a fallback check could ever need. This is a compiled sub-graph invoked as
+# a single atomic node in the pipeline graph, the same pattern the sibling
+# ridesharing project used for its own per-zone sub-graphs in Stage 5.
 
 class _EscalationState(TypedDict):
     messages: Annotated[list[BaseMessage], operator.add]
@@ -154,12 +135,11 @@ Once you've investigated every feature listed, respond with EXACTLY one line per
 <feature_name>: match|mismatch|unconfirmed"""
 
 
-def build_graph():
+def build_escalation_graph():
     """
-    Compiles the narrow escalation sub-graph — standard LangGraph ReAct
-    shape (agent <-> tools via tools_condition), but bound to only
-    read_label_text and ask_vision_question, and only ever invoked by
-    _escalate_ambiguous below when there's genuinely something to escalate.
+    Compiles the escalation sub-graph — a small agent-and-tools loop bound
+    to only read_label_text and ask_vision_question, invoked as a single
+    node inside the full pipeline graph built by build_graph() below.
     """
     llm = ChatOllama(model=OLLAMA_MODEL, temperature=0)
     llm_with_tools = llm.bind_tools(ALL_TOOLS)
@@ -179,7 +159,7 @@ def build_graph():
     return graph.compile()
 
 
-def _escalate_ambiguous(graph, image_url: str, ambiguous_results: dict) -> dict:
+def _escalate_ambiguous(escalation_graph, image_url: str, ambiguous_results: dict) -> dict:
     lines = "\n".join(
         f"- {f}: claimed value is '{r['value']}'; a targeted question got the answer "
         f"'{r.get('vqa_answer', 'n/a')}', which wasn't conclusive"
@@ -191,7 +171,7 @@ def _escalate_ambiguous(graph, image_url: str, ambiguous_results: dict) -> dict:
         "Investigate each and report your findings."
     ))
 
-    result = graph.invoke(
+    result = escalation_graph.invoke(
         {"messages": [SystemMessage(content=ESCALATION_SYSTEM_PROMPT), human_msg]},
         config={"recursion_limit": RECURSION_LIMIT},
     )
@@ -272,65 +252,200 @@ def _assemble_result(category: str, results: dict, critical_feature_names: list[
     }
 
 
-# ── Top-level orchestration ──────────────────────────────────────────────────
+# ── The full pipeline, as one StateGraph ────────────────────────────────────
+# Every step is a node — including the deterministic ones. A deterministic
+# node is still a legitimate graph node: the sibling ridesharing project's
+# Stage 1 built a fully rule-based StateGraph with no LLM at all, for the
+# same reason this one does — one state object threads through every step,
+# and one diagram shows the whole agent, not just the one part that happens
+# to call an LLM.
+
+class PipelineState(TypedDict):
+    # inputs
+    image_url: str
+    raw_description: str
+    # set by detect_category_node
+    raw_category: str          # the raw VQA answer, e.g. "this is a grocery item..."
+    product: str
+    product_confirmed: bool
+    display_category: str      # resolved, clean category name (e.g. "grocery")
+    # set by resolve_schema_node
+    critical_features: list[str]
+    cosmetic_features: list[str]
+    # set by extract_features_node
+    description_features: dict
+    # set by hard_stop_check_node
+    hard_stop: bool
+    # set by build_checklist_node
+    checklist: dict
+    checklist_critical: list[str]
+    # set by verify_features_node / escalate_node
+    results: dict
+    ambiguous: list[str]
+    escalated: bool
+    # set by assemble_result_node
+    verdict: str
+    category: str
+    critical_checked: dict
+    other_checked: dict
+    answer: str
+    ambiguous_features: list[str]
+
+
+def detect_category_node(state: PipelineState) -> dict:
+    """Ask the image what category and product it shows. Always runs first — nothing here depends on the description."""
+    category, product, product_confirmed = detect_category_and_product(state["image_url"])
+    return {
+        "raw_category": category,
+        "product": product,
+        "product_confirmed": product_confirmed,
+        "display_category": _clean_category_name(category),
+    }
+
+
+def resolve_schema_node(state: PipelineState) -> dict:
+    """Look up which features this category's policy marks as critical vs. cosmetic."""
+    critical_features, cosmetic_features = get_checklist_features(state["raw_category"])
+    return {"critical_features": critical_features, "cosmetic_features": cosmetic_features}
+
+
+def extract_features_node(state: PipelineState) -> dict:
+    """Map the listing's raw text onto the resolved category's known schema. The one LLM call most listings need."""
+    description_features = extract_description_features(
+        state["raw_description"], state["raw_category"],
+        state["critical_features"], state["cosmetic_features"],
+    )
+    return {"description_features": description_features}
+
+
+def hard_stop_check_node(state: PipelineState) -> dict:
+    """Does the image-grounded product agree with what the description claims? A confident disagreement ends the check here."""
+    resolved_product = state["product"] if state["product_confirmed"] else state["raw_category"]
+    claimed_product_type = state["description_features"].get("product_type", "")
+    if _hard_stop_mismatch(resolved_product, claimed_product_type):
+        results = {"product_type": {"value": claimed_product_type, "match": False, "source": "detect_category/detect_product"}}
+        return {
+            "hard_stop": True, "results": results, "checklist_critical": ["product_type"],
+            "escalated": False, "ambiguous": [],
+        }
+    return {"hard_stop": False}
+
+
+def route_after_hard_stop(state: PipelineState) -> Literal["hard_stop", "continue"]:
+    return "hard_stop" if state["hard_stop"] else "continue"
+
+
+def build_checklist_node(state: PipelineState) -> dict:
+    """Union the policy's critical features with any other concrete claim the description makes."""
+    checklist, checklist_critical = _build_checklist(state["critical_features"], state["description_features"])
+    return {"checklist": checklist, "checklist_critical": checklist_critical}
+
+
+def verify_features_node(state: PipelineState) -> dict:
+    """Check each checklist feature against the image: OCR first, a targeted question as fallback."""
+    results, ambiguous = _deterministic_verify(state["image_url"], state["checklist"])
+    claimed_product_type = state["description_features"].get("product_type", "")
+    results["product_type"] = {"value": claimed_product_type, "match": True, "source": "detect_category/detect_product"}
+    checklist_critical = state["checklist_critical"] + (["product_type"] if claimed_product_type else [])
+    return {
+        "results": results, "ambiguous": ambiguous, "checklist_critical": checklist_critical,
+        "escalated": bool(ambiguous),
+    }
+
+
+def route_after_verify(state: PipelineState) -> Literal["escalate", "assemble"]:
+    return "escalate" if state["ambiguous"] else "assemble"
+
+
+def assemble_result_node(state: PipelineState) -> dict:
+    """Compute the final verdict from everything gathered — any critical mismatch is a hard veto."""
+    return _assemble_result(
+        state["display_category"], state["results"], critical_feature_names=state["checklist_critical"],
+        product=state.get("product"), product_confirmed=state.get("product_confirmed"),
+        description_features=state.get("description_features", {}),
+        hard_stop=state["hard_stop"], escalated=state.get("escalated", False),
+        ambiguous_features=state.get("ambiguous", []),
+    )
+
+
+def make_escalate_node(escalation_graph):
+    """
+    Wraps the compiled escalation sub-graph as a single pipeline node. A
+    factory rather than a plain function because the node needs the
+    already-compiled sub-graph closed over it — building a fresh one on
+    every call would reload the LLM binding for no reason.
+    """
+    def escalate_node(state: PipelineState) -> dict:
+        """Investigate any feature that stayed ambiguous, using the escalation sub-graph."""
+        ambiguous_results = {f: state["results"][f] for f in state["ambiguous"]}
+        resolved = _escalate_ambiguous(escalation_graph, state["image_url"], ambiguous_results)
+        results = dict(state["results"])
+        for f, verdict in resolved.items():
+            results[f]["match"] = verdict
+        return {"results": results}
+    return escalate_node
+
+
+def build_graph():
+    """
+    Builds the full pipeline as one StateGraph — category/product detection,
+    schema resolution, extraction, the hard-stop check, checklist building,
+    feature verification, escalation, and verdict assembly are all nodes on
+    the same graph, wired with two conditional edges (skip straight to the
+    verdict on a hard-stop; only escalate if something stayed ambiguous).
+    """
+    escalation_graph = build_escalation_graph()
+    escalate_node = make_escalate_node(escalation_graph)
+
+    g = StateGraph(PipelineState)
+    g.add_node("detect_category", detect_category_node)
+    g.add_node("resolve_schema", resolve_schema_node)
+    g.add_node("extract_features", extract_features_node)
+    g.add_node("hard_stop_check", hard_stop_check_node)
+    g.add_node("build_checklist", build_checklist_node)
+    g.add_node("verify_features", verify_features_node)
+    g.add_node("escalate", escalate_node)
+    g.add_node("assemble_result", assemble_result_node)
+
+    g.add_edge(START, "detect_category")
+    g.add_edge("detect_category", "resolve_schema")
+    g.add_edge("resolve_schema", "extract_features")
+    g.add_edge("extract_features", "hard_stop_check")
+    g.add_conditional_edges("hard_stop_check", route_after_hard_stop, {
+        "hard_stop": "assemble_result",
+        "continue": "build_checklist",
+    })
+    g.add_edge("build_checklist", "verify_features")
+    g.add_conditional_edges("verify_features", route_after_verify, {
+        "escalate": "escalate",
+        "assemble": "assemble_result",
+    })
+    g.add_edge("escalate", "assemble_result")
+    g.add_edge("assemble_result", END)
+
+    return g.compile()
+
 
 def verify_listing(graph, image_url: str, raw_description: str) -> dict:
     """
-    Runs the full pipeline for one listing. `raw_description` is the
+    Runs the full pipeline graph for one listing. `raw_description` is the
     listing's actual text — a title/description a seller wrote, e.g.
     "Prairie Farms Whole Milk, 1 Quart Carton" — not a pre-structured dict.
-    Real listings never arrive pre-parsed; extraction is what turns this raw
-    text into the same feature -> value shape the rest of the pipeline
-    already expected, so it always runs, unconditionally, not as a fallback
-    for "unstructured" input versus some other structured path.
 
-    `graph` is the compiled escalation sub-graph from build_graph() — only
-    ever actually invoked if a feature genuinely can't be resolved
-    deterministically, so most listings complete this function with only
-    the one extraction LLM call, not a full ReAct loop.
-
-    Returns a dict with the final "verdict"/"answer" plus diagnostic fields
-    (category, product, escalated, ambiguous_features, ...) useful for
-    inspecting exactly which stage resolved (or didn't resolve) each part of
-    the listing — mainly for the notebook's demonstration, not required by
-    the verdict logic itself.
+    `graph` is the compiled pipeline graph from build_graph(). Most listings
+    complete it with only one LLM call (extraction); escalation only adds
+    more if a feature genuinely can't be resolved deterministically.
     """
-    category, product, product_confirmed = detect_category_and_product(image_url)
-    resolved_product = product if product_confirmed else category
-    display_category = _clean_category_name(category)
-
-    critical_features, cosmetic_features = get_checklist_features(category)
-    description_features = extract_description_features(
-        raw_description, category, critical_features, cosmetic_features,
-    )
-
-    claimed_product_type = description_features.get("product_type", "")
-    if _hard_stop_mismatch(resolved_product, claimed_product_type):
-        results = {"product_type": {"value": claimed_product_type, "match": False, "source": "detect_category/detect_product"}}
-        return _assemble_result(
-            display_category, results, critical_feature_names=["product_type"],
-            product=product, product_confirmed=product_confirmed,
-            description_features=description_features,
-            hard_stop=True, escalated=False, ambiguous_features=[],
-        )
-
-    checklist, checklist_critical = _build_checklist(critical_features, description_features)
-
-    results, ambiguous = _deterministic_verify(image_url, checklist)
-
-    escalated = bool(ambiguous)
-    if ambiguous:
-        ambiguous_results = {f: results[f] for f in ambiguous}
-        resolved = _escalate_ambiguous(graph, image_url, ambiguous_results)
-        for f, verdict in resolved.items():
-            results[f]["match"] = verdict
-
-    results["product_type"] = {"value": claimed_product_type, "match": True, "source": "detect_category/detect_product"}
-    checklist_critical_with_product = checklist_critical + (["product_type"] if claimed_product_type else [])
-
-    return _assemble_result(
-        display_category, results, critical_feature_names=checklist_critical_with_product,
-        product=product, product_confirmed=product_confirmed,
-        description_features=description_features,
-        hard_stop=False, escalated=escalated, ambiguous_features=ambiguous,
-    )
+    initial_state: PipelineState = {
+        "image_url": image_url,
+        "raw_description": raw_description,
+        "raw_category": "", "product": "", "product_confirmed": False, "display_category": "",
+        "critical_features": [], "cosmetic_features": [],
+        "description_features": {},
+        "hard_stop": False,
+        "checklist": {}, "checklist_critical": [],
+        "results": {}, "ambiguous": [], "escalated": False,
+        "verdict": "", "category": "", "critical_checked": {}, "other_checked": {},
+        "answer": "", "ambiguous_features": [],
+    }
+    return graph.invoke(initial_state)

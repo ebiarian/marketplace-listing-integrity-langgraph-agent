@@ -1,6 +1,8 @@
 # Marketplace Listing Integrity Agent
 
-A hybrid pipeline that decides whether a marketplace listing's image genuinely matches its text description — grounded by a **RAG** knowledge base of category-specific verification policy, with an **LLM** reserved for the small number of steps that are genuine judgment calls, orchestrated as a narrow **LangGraph ReAct** loop rather than deciding every step.
+An agent that uses RAG and an LLM to decide whether a marketplace listing's image genuinely matches its text description.
+
+> **Full article:** [Building a Marketplace Listing Integrity Agent with LangGraph](docs/article.md)
 
 ---
 
