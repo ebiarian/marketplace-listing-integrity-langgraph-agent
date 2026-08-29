@@ -1,4 +1,4 @@
-# Building a Marketplace Listing Integrity Agent with LangGraph — Deciding Where the LLM Actually Belongs
+# Building a Marketplace Listing Integrity Agent with LangGraph
 
 ---
 
